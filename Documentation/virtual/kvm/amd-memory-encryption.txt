@@ -1,0 +1,226 @@
+Secure Encrypted Virtualization (SEV) is a feature found on AMD processors.
+
+SEV is an extension to the AMD-V architecture which supports running virtual
+machines (VMs) under the control of a hypervisor. When enabled, the memory
+contents of VM will be transparently encrypted with a key unique to the VM.
+
+Hypervisor can determine the SEV support through the CPUID instruction. The CPUID
+function 0x8000001f reports information related to SEV:
+
+	0x8000001f[eax]:
+			Bit[1] 	indicates support for SEV
+
+	0x8000001f[ecx]:
+			Bits[31:0]  Number of encrypted guests supported simultaneously
+
+If support for SEV is present, MSR 0xc001_0010 (MSR_K8_SYSCFG) and MSR 0xc001_0015
+(MSR_K7_HWCR) can be used to determine if it can be enabled:
+
+	0xc001_0010:
+		Bit[23]	   1 = memory encryption can be enabled
+			   0 = memory encryption can not be enabled
+
+	0xc001_0015:
+		Bit[0]	   1 = memory encryption can be enabled
+			   0 = memory encryption can not be enabled
+
+When SEV support is available, it can be enabled in a specific VM by setting SEV
+bit before executing VMRUN.
+
+	VMCB[0x90]:
+		Bit[1]	    1 = SEV is enabled
+			    0 = SEV is disabled
+
+SEV hardware uses ASIDs to associate a memory encryption key with a VM.
+Hence, the ASID for the SEV-enabled guests must be from 1 to a maximum value
+defined in the CPUID 0x8000001f[ecx] field.
+
+SEV Key Management
+------------------
+The Key management for the SEV guest is handled by a separate processor known as
+the AMD Secure Processor (AMD-SP). Firmware running inside the AMD-SP provides a
+secure key management interface to perform common hypervisor activities such as
+encrypting bootstrap code, snapshot, migrating and debugging the guest. For
+more information, see SEV Key Management spec at
+
+http://support.amd.com/TechDocs/55766_SEV-KM%20API_Specification.pdf
+
+KVM implements the following commands to support SEV guests common lifecycle
+events such as launching, running, snapshotting, migrating and decommissioning
+guests.
+
+1. KVM_SEV_INIT
+
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_INIT command is used by the hypervisor to initialize the SEV platform
+context. In a typical workflow, this command should be the first command issued.
+
+2. KVM_SEV_LAUNCH_START
+
+Parameters: struct  kvm_sev_launch_start (in/out)
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_LAUNCH_START command is used for creating the memory encryption
+context. To create the encryption context, user must provide a guest policy,
+the owner's public Diffie-Hellman (PDH) key and session information.
+
+struct kvm_sev_launch_start {
+	/* if zero then firmware creates a new handle */
+	__u32 handle;
+
+	/* guest's policy */
+	__u32 policy;
+
+	/* userspace address pointing to the guest owner's PDH key */
+	__u64 dh_uaddr;
+	__u32 dh_len;
+
+	/* userspace address which points to the guest session information */
+	__u64 session_addr;
+	__u32 session_len;
+};
+
+On success, the 'handle' field contain a new handle and on error, a negative value.
+
+For more details, see SEV spec Section 6.2.
+
+3. KVM_SEV_LAUNCH_UPDATE_DATA
+
+Parameters (in): struct  kvm_sev_launch_update_data
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_LAUNCH_UPDATE_DATA is used for encrypting the memory region. It also
+calculates a measurement of the memory contents. The measurement is a signature
+of the memory contents that can be sent to the guest owners as an attestation
+that the memory was encrypted correctly by the firmware.
+
+struct kvm_sev_launch_update {
+	/* userspace address need to be encrypted (must be 16-byte aligned) */
+	__u64 uaddr;
+
+	/* length of the data to be encrypted (must be 16-byte aligned) */
+	__u32 len;
+};
+
+For more details, see SEV spec Section 6.3.
+
+4. KVM_SEV_LAUNCH_MEASURE
+
+Parameters (in): struct  kvm_sev_launch_measure
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_LAUNCH_MEASURE command is used to retrieve the measurement of the
+data encrypted by the KVM_SEV_LAUNCH_UPDATE_DATA. The guest owner may wait to
+provide the guest with confidential information until it can verify the measurement.
+Since the guest owner knows the initial contents of the guest at boot, the
+measurement can be verified by comparing it to what the guest owner expect.
+
+struct kvm_sev_launch_measure {
+	/* where to copy the measurement */
+	__u64 uaddr;
+
+	/* length of measurement blob */
+	__u32 len;
+};
+
+For more details on the measurement verification flow, see SEV spec Section 6.4
+
+5. KVM_SEV_LAUNCH_FINISH
+
+Returns: 0 on success, -negative on error
+
+After completion of the launch flow, the KVM_SEV_LAUNCH_FINISH command can be
+issued to make the guest ready for the execution.
+
+6. KVM_SEV_GUEST_STATUS
+
+Parameters (out): struct kvm_sev_guest_status
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_GUEST_STATUS command is used to retrieve status information about an
+SEV-enabled guest..
+
+struct kvm_sev_guest_status {
+	/* guest handle */
+	__u32 handle;
+
+	/* guest policy */
+	__u32 policy;
+
+	/* guest state  (see below) */
+	__u8 state;
+};
+
+SEV guest state:
+
+enum {
+	SEV_STATE_INVALID = 0;
+	SEV_STATE_LAUNCHING,	/* guest is currently being launched */
+	SEV_STATE_SECRET,	/* guest is being launched and ready to accept the ciphertext data */
+	SEV_STATE_RUNNING,	/* guest is fully launched and running */
+	SEV_STATE_RECEIVING,	/* guest is being migrated in from another SEV machine */
+	SEV_STATE_SENDING	/* guest is getting migrated out to another SEV machine */
+};
+
+7. KVM_SEV_DBG_DECRYPT
+
+Parameters (in): struct kvm_sev_dbg
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_DEBUG_DECRYPT command can be used by the hypervisor to request the
+firmware to decrypt the data at the given memory region.
+
+struct kvm_sev_dbg {
+	/* userspace address of data to decrypt */
+	__u64 src_uaddr;
+	/* userspace address of destination */
+	__u64 dst_uaddr;
+
+	/* length of memory region to decrypt */
+	__u32 len;
+};
+
+The command returns an error if guest policy does not allow debugging.
+
+8. KVM_SEV_DBG_ENCRYPT
+
+Parameters (in): struct kvm_sev_dbg
+Returns: 0 on success, -negative on error
+
+The KVM_SEV_DEBUG_ENCRYPT command can be used by the hypervisor to request the
+firmware to encrypt the data at the given memory region.
+
+struct kvm_sev_dbg {
+	/* userspace address of data to encrypt */
+	__u64 src_uaddr;
+	/* userspace address of destination */
+	__u64 dst_uaddr;
+
+	/* length of memory region to encrypt */
+	__u32 len;
+};
+
+The command returns an error if guest policy does not allow debugging.
+
+9. KVM_SEV_LAUNCH_SECRET
+
+Parameters (in): struct kvm_sev_launch_secret
+Returns: 0 on success, -negative on error
+
+Te KVM_SEV_LAUNCH_SECRET command can be used by the hypevisor to inject a secret
+data after the measurement has been validated by the guest owner.
+
+struct kvm_sev_launch_secret {
+	/* userspace address containing the packet header */
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+
+	/* the guest memory region where the secret should be injected */
+	__u64 guest_uaddr;
+	__u32 guest_len;
+
+	/* the hypervisor memory region which contains the secret */
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
