@@ -319,6 +319,8 @@ enum {
 
 #define VMCB_AVIC_APIC_BAR_MASK		0xFFFFFFFFFF000ULL
 
+static unsigned int max_sev_asid;
+
 static inline void mark_all_dirty(struct vmcb *vmcb)
 {
 	vmcb->control.clean = 0;
@@ -783,7 +785,7 @@ static int svm_hardware_enable(void)
 	sd->asid_generation = 1;
 	sd->max_asid = cpuid_ebx(SVM_CPUID_FUNC) - 1;
 	sd->next_asid = sd->max_asid + 1;
-	sd->min_asid = 1;
+	sd->min_asid = max_sev_asid + 1;
 
 	gdt = get_current_gdt_rw();
 	sd->tss_desc = (struct kvm_ldttss_desc *)(gdt + GDT_ENTRY_TSS);
@@ -1050,6 +1052,15 @@ static int avic_ga_log_notifier(u32 ga_tag)
 	return 0;
 }
 
+/*
+ * Get maximum number of encrypted guest supported: Fn8001_001F[ECX].
+ *     [31:0]: Number of supported guest
+ */
+static __init void sev_hardware_setup(void)
+{
+	max_sev_asid = cpuid_ecx(0x8000001F);
+}
+
 static __init int svm_hardware_setup(void)
 {
 	int cpu;
@@ -1079,6 +1090,9 @@ static __init int svm_hardware_setup(void)
 		kvm_max_tsc_scaling_ratio = TSC_RATIO_MAX;
 		kvm_tsc_scaling_ratio_frac_bits = 32;
 	}
+
+	if (boot_cpu_has(X86_FEATURE_SEV))
+		sev_hardware_setup();
 
 	if (nested) {
 		printk(KERN_INFO "kvm: Nested Virtualization enabled\n");
