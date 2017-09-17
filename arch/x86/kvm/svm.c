@@ -37,6 +37,8 @@
 #include <linux/amd-iommu.h>
 #include <linux/hashtable.h>
 #include <linux/frame.h>
+#include <linux/psp-sev.h>
+#include <linux/file.h>
 
 #include <asm/apic.h>
 #include <asm/perf_event.h>
@@ -320,6 +322,19 @@ enum {
 #define VMCB_AVIC_APIC_BAR_MASK		0xFFFFFFFFFF000ULL
 
 static unsigned int max_sev_asid;
+static unsigned long *sev_asid_bitmap;
+
+static inline bool svm_sev_enabled(void)
+{
+	return max_sev_asid;
+}
+
+static inline bool sev_guest(struct kvm *kvm)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+
+	return sev->active;
+}
 
 static inline void mark_all_dirty(struct vmcb *vmcb)
 {
@@ -1059,6 +1074,11 @@ static int avic_ga_log_notifier(u32 ga_tag)
 static __init void sev_hardware_setup(void)
 {
 	max_sev_asid = cpuid_ecx(0x8000001F);
+
+	/* Initialize SEV ASID bitmap */
+	if (max_sev_asid)
+		sev_asid_bitmap = kcalloc(BITS_TO_LONGS(max_sev_asid),
+					sizeof(unsigned long), GFP_KERNEL);
 }
 
 static __init int svm_hardware_setup(void)
@@ -1156,9 +1176,44 @@ err:
 	return r;
 }
 
+static int sev_platform_get_state(int *state, int *error)
+{
+	int ret;
+	struct sev_data_status *data;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	ret = sev_platform_status(data, error);
+	if (!ret)
+		*state = data->state;
+
+	pr_info_once("SEV firmware major %d minor %d build %d\n",
+			data->api_major, data->api_minor, data->build);
+
+	kfree(data);
+	return ret;
+}
+
+static __exit void sev_hardware_unsetup(void)
+{
+	int state;
+
+	sev_platform_get_state(&state, NULL);
+
+	if (state != SEV_STATE_UNINIT)
+		sev_platform_shutdown(NULL);
+
+	kfree(sev_asid_bitmap);
+}
+
 static __exit void svm_hardware_unsetup(void)
 {
 	int cpu;
+
+	if (svm_sev_enabled())
+		sev_hardware_unsetup();
 
 	for_each_possible_cpu(cpu)
 		svm_cpu_uninit(cpu);
@@ -1350,6 +1405,9 @@ static void init_vmcb(struct vcpu_svm *svm)
 		svm->vmcb->control.int_ctl |= V_GIF_ENABLE_MASK;
 	}
 
+	if (sev_guest(svm->vcpu.kvm))
+		svm->vmcb->control.nested_ctl |= SVM_NESTED_CTL_SEV_ENABLE;
+
 	mark_all_dirty(svm->vmcb);
 
 	enable_gif(svm);
@@ -1432,6 +1490,38 @@ static int avic_init_backing_page(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+static void sev_firmware_exit(void)
+{
+	int state;
+
+	sev_platform_get_state(&state, NULL);
+
+	if (state == SEV_STATE_INIT)
+		sev_platform_shutdown(NULL);
+}
+
+static void sev_asid_free(struct kvm *kvm)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	int pos, asid;
+
+	if (!svm_sev_enabled())
+		return;
+
+	asid = sev->asid;
+	pos = asid - 1;
+	clear_bit(pos, sev_asid_bitmap);
+}
+
+static void sev_vm_destroy(struct kvm *kvm)
+{
+	if (!sev_guest(kvm))
+		return;
+
+	sev_firmware_exit();
+	sev_asid_free(kvm);
+}
+
 static void avic_vm_destroy(struct kvm *kvm)
 {
 	unsigned long flags;
@@ -1448,6 +1538,12 @@ static void avic_vm_destroy(struct kvm *kvm)
 	spin_lock_irqsave(&svm_vm_data_hash_lock, flags);
 	hash_del(&vm_data->hnode);
 	spin_unlock_irqrestore(&svm_vm_data_hash_lock, flags);
+}
+
+static void svm_vm_destroy(struct kvm *kvm)
+{
+	avic_vm_destroy(kvm);
+	sev_vm_destroy(kvm);
 }
 
 static int avic_vm_init(struct kvm *kvm)
@@ -5416,6 +5512,92 @@ static void svm_setup_mce(struct kvm_vcpu *vcpu)
 	vcpu->arch.mcg_cap &= 0x1ff;
 }
 
+static int sev_asid_new(void)
+{
+	int pos;
+
+	if (!svm_sev_enabled())
+		return -EINVAL;
+
+	pos = find_first_zero_bit(sev_asid_bitmap, max_sev_asid);
+	if (pos >= max_sev_asid)
+		return -EBUSY;
+
+	set_bit(pos, sev_asid_bitmap);
+	return pos + 1;
+}
+
+static int sev_firmware_init(struct kvm *kvm, int *error)
+{
+	int ret, state = 0;
+
+	ret = sev_platform_get_state(&state, error);
+	if (ret)
+		return ret;
+
+	 /* If SEV firmware is in uninitialized state, lets initialize it. */
+	if (state == SEV_STATE_UNINIT) {
+		struct sev_data_init *data;
+
+		data = kzalloc(sizeof(*data), GFP_KERNEL);
+		if (!data)
+			return -ENOMEM;
+
+		ret = sev_platform_init(data, error);
+		kfree(data);
+	}
+
+	return ret;
+}
+
+static int sev_guest_init(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	int asid, ret;
+
+	ret = sev_firmware_init(kvm, &argp->error);
+	if (ret)
+		return ret;
+
+	ret = -EBUSY;
+	asid = sev_asid_new();
+	if (asid < 0)
+		goto e_shutdown;
+
+	sev->active = true;
+	sev->asid = asid;
+	return 0;
+
+e_shutdown:
+	sev_firmware_exit();
+	return ret;
+}
+
+static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
+{
+	struct kvm_sev_cmd sev_cmd;
+	int r = -ENOTTY;
+
+	if (copy_from_user(&sev_cmd, argp, sizeof(struct kvm_sev_cmd)))
+		return -EFAULT;
+
+	mutex_lock(&kvm->lock);
+
+	switch (sev_cmd.id) {
+	case KVM_SEV_INIT: {
+		r = sev_guest_init(kvm, &sev_cmd);
+		break;
+	}
+	default:
+		break;
+	}
+
+	mutex_unlock(&kvm->lock);
+	if (copy_to_user(argp, &sev_cmd, sizeof(struct kvm_sev_cmd)))
+		r = -EFAULT;
+	return r;
+}
+
 static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.cpu_has_kvm_support = has_svm,
 	.disabled_by_bios = is_disabled,
@@ -5432,7 +5614,7 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.vcpu_reset = svm_vcpu_reset,
 
 	.vm_init = avic_vm_init,
-	.vm_destroy = avic_vm_destroy,
+	.vm_destroy = svm_vm_destroy,
 
 	.prepare_guest_switch = svm_prepare_guest_switch,
 	.vcpu_load = svm_vcpu_load,
@@ -5526,6 +5708,8 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.deliver_posted_interrupt = svm_deliver_avic_intr,
 	.update_pi_irte = svm_update_pi_irte,
 	.setup_mce = svm_setup_mce,
+
+	.mem_enc_op = svm_mem_enc_op,
 };
 
 static int __init svm_init(void)
