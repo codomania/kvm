@@ -1063,6 +1063,8 @@ struct kvm_x86_ops {
 	void (*setup_mce)(struct kvm_vcpu *vcpu);
 
 	int (*mem_enc_op)(struct kvm *kvm, void __user *argp);
+	int (*mem_enc_register_region)(struct kvm *kvm, struct kvm_enc_region *argp);
+	int (*mem_enc_unregister_region)(struct kvm *kvm, struct kvm_enc_region *argp);
 };
 
 struct kvm_arch_async_pf {
