@@ -4953,6 +4953,23 @@ int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t cr2, u64 error_code,
 	if (mmio_info_in_cache(vcpu, cr2, direct))
 		emulation_type = 0;
 emulate:
+	/*
+	 * On AMD platforms, under certain conditions insn_len may be zero on #NPF.
+	 * This can happen if a guest gets a page-fault on data access but the HW
+	 * table walker is not able to read the instruction page (e.g instruction
+	 * page is not present in memory).
+	 *
+	 * Typically, when insn_len is zero, x86_emulate_instruction() walks the
+	 * guest page table and fetches the instruction bytes from guest memory.
+	 * When SEV is enabled, the guest memory is encrypted with guest-specific
+	 * key hence hypervisor will not able to fetch the instruction bytes.
+	 * In those cases we simply restart the guest.
+	 */
+	if (unlikely(!insn_len) &&
+	    kvm_x86_ops->mem_enc_enabled &&
+	    kvm_x86_ops->mem_enc_enabled(vcpu))
+		return 1;
+
 	er = x86_emulate_instruction(vcpu, cr2, emulation_type, insn, insn_len);
 
 	switch (er) {
