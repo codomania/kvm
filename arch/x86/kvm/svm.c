@@ -5989,6 +5989,68 @@ e_free:
 	return ret;
 }
 
+static int sev_launch_measure(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	struct sev_data_launch_measure *data;
+	struct kvm_sev_launch_measure params;
+	void *blob;
+	int ret;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	if (copy_from_user(&params, (void __user *)(uintptr_t)argp->data,
+			   sizeof(struct kvm_sev_launch_measure)))
+		return -EFAULT;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	blob = NULL;
+	if (params.uaddr) {
+		if (params.len > SEV_FW_BLOB_MAX_SIZE) {
+			ret = -EINVAL;
+			goto e_free;
+		}
+
+		if (!access_ok(VERIFY_WRITE, params.uaddr, params.len)) {
+			ret = -EFAULT;
+			goto e_free;
+		}
+
+		ret = -ENOMEM;
+		blob = kmalloc(params.len, GFP_KERNEL);
+		if (!blob)
+			goto e_free;
+
+		data->address = __psp_pa(blob);
+		data->len = params.len;
+	}
+
+	data->handle = sev->handle;
+	ret = sev_issue_cmd(kvm, SEV_CMD_LAUNCH_MEASURE, data, &argp->error);
+
+	/* copy the measurement to userspace */
+	if (blob &&
+	    copy_to_user((void __user *)(uintptr_t)params.uaddr, blob, params.len)) {
+		ret = -EFAULT;
+		goto e_free_blob;
+	}
+
+	params.len = data->len;
+	if (copy_to_user((void __user *)(uintptr_t)argp->data, &params,
+			sizeof(struct kvm_sev_launch_measure)))
+		ret = -EFAULT;
+
+e_free_blob:
+	kfree(blob);
+e_free:
+	kfree(data);
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -6010,6 +6072,10 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 	}
 	case KVM_SEV_LAUNCH_UPDATE_DATA: {
 		r = sev_launch_update_data(kvm, &sev_cmd);
+		break;
+	}
+	case KVM_SEV_LAUNCH_MEASURE: {
+		r = sev_launch_measure(kvm, &sev_cmd);
 		break;
 	}
 	default:
