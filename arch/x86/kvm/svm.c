@@ -6102,6 +6102,183 @@ e_free:
 	return ret;
 }
 
+static int __sev_issue_dbg_cmd(struct kvm *kvm, unsigned long src,
+			       unsigned long dst, int size,
+			       int *error, bool enc)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	struct sev_data_dbg *data;
+	int ret;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	data->handle = sev->handle;
+	data->dst_addr = dst;
+	data->src_addr = src;
+	data->len = size;
+
+	ret = sev_issue_cmd(kvm,
+			    enc ? SEV_CMD_DBG_ENCRYPT : SEV_CMD_DBG_DECRYPT,
+			    data, error);
+	kfree(data);
+	return ret;
+}
+
+/*
+ * Decrypt source memory into userspace or kernel buffer. If destination buffer
+ * or len is not aligned to 16-byte boundary then it uses intermediate buffer.
+ */
+static int __sev_dbg_decrypt(struct kvm *kvm, unsigned long paddr,
+			     unsigned long __user dst_uaddr,
+			     unsigned long dst_kaddr, unsigned long dst_paddr,
+			     int size, int *error)
+{
+	int ret, offset = 0, len = size;
+	struct page *tpage = NULL;
+
+	/*
+	 * Debug command works with 16-byte aligned inputs, check if all inputs
+	 * (src, dst and len) are 16-byte aligned. If one of the input is not
+	 * aligned then we decrypt more than requested into a temporary buffer
+	 * and copy the porition of data into destination buffer.
+	 */
+	if (!IS_ALIGNED(paddr, 	   16) ||
+	    !IS_ALIGNED(dst_paddr, 16) ||
+	    !IS_ALIGNED(size, 	   16)) {
+		tpage = (void *)alloc_page(GFP_KERNEL);
+		if (!tpage)
+			return -ENOMEM;
+
+		dst_paddr = __sme_page_pa(tpage);
+
+		/*
+		 * if source buffer is not aligned then offset will be used
+		 * when copying the data from the temporary buffer into
+		 * destination buffer.
+		 */
+		offset = paddr & 15;
+
+		/* its safe to read more than requested size. */
+		len = round_up(size + offset, 16);
+
+		paddr = round_down(paddr, 16);
+
+		/*
+		 * The PSP may write the memory region with different C-bit (e.g
+		 * x86 cache may have a mapping with C=0 and PSP may write the same
+		 * region with C=1) hence lets make sure we invalidate the caches
+		 * so that we can see the recent contents after the command
+		 * completes.
+		 */
+		clflush_cache_range(page_address(tpage), PAGE_SIZE);
+	}
+
+	ret = __sev_issue_dbg_cmd(kvm, paddr, dst_paddr, len, error, false);
+
+	/*
+	 * If temporary buffer is used then copy the data from temporary buffer
+	 * into destination buffer.
+	 */
+	if (!ret && tpage) {
+		/*
+		 * If destination buffer is a userspace buffer then use
+		 * copy_to_user otherwise memcpy.
+		 */
+		if (dst_uaddr) {
+			if (copy_to_user((void __user *)(uintptr_t)dst_uaddr,
+					 page_address(tpage) + offset, size))
+				ret = -EFAULT;
+		} else {
+			memcpy((void *)dst_kaddr, page_address(tpage) + offset, size);
+		}
+	}
+
+	if (tpage)
+		__free_page(tpage);
+
+	return ret;
+}
+
+static int sev_dbg_crypt(struct kvm *kvm, struct kvm_sev_cmd *argp, bool dec)
+{
+	unsigned long vaddr, vaddr_end, next_vaddr;
+	unsigned long dst_vaddr, dst_vaddr_end;
+	struct page **src_p, **dst_p;
+	struct kvm_sev_dbg debug;
+	unsigned long n;
+	int ret, size;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	if (copy_from_user(&debug, (void __user *)(uintptr_t)argp->data,
+			   sizeof(struct kvm_sev_dbg)))
+		return -EFAULT;
+
+	vaddr = debug.src_uaddr;
+	size = debug.len;
+	vaddr_end = vaddr + size;
+	dst_vaddr = debug.dst_uaddr;
+	dst_vaddr_end = dst_vaddr + size;
+
+	for (; vaddr < vaddr_end; vaddr = next_vaddr) {
+		int len, s_off, d_off;
+
+		/* lock userspace source and destination page */
+		src_p = sev_pin_memory(kvm, vaddr & PAGE_MASK, PAGE_SIZE, &n, 0);
+		if (!src_p)
+			return -EFAULT;
+
+		dst_p = sev_pin_memory(kvm, dst_vaddr & PAGE_MASK, PAGE_SIZE, &n, 1);
+		if (!dst_p) {
+			sev_unpin_memory(kvm, src_p, n);
+			return -EFAULT;
+		}
+
+		/*
+		 * The PSP may write the memory region with different C-bit (e.g
+		 * x86 cache may have a mapping with C=0 and PSP may write the same
+		 * region with C=1) hence lets make sure we invalidate the caches
+		 * so that we can see the recent contents after the command completion.
+		 */
+		sev_clflush_pages(src_p, 1);
+		sev_clflush_pages(dst_p, 1);
+
+		/*
+		 * since user buffer may not be page aligned, calculate the
+		 * offset within the page.
+		 */
+		s_off = vaddr & ~PAGE_MASK;
+		d_off = dst_vaddr & ~PAGE_MASK;
+		len = min_t(size_t, (PAGE_SIZE - s_off), size);
+
+		ret = __sev_dbg_decrypt(kvm,
+				       __sme_page_pa(src_p[0]) + s_off,
+				       dst_vaddr, 0,
+				       __sme_page_pa(dst_p[0]) + d_off,
+				       len, &argp->error);
+
+		sev_unpin_memory(kvm, src_p, 1);
+		sev_unpin_memory(kvm, dst_p, 1);
+
+		if (ret)
+			goto err;
+
+		next_vaddr = vaddr + len;
+		dst_vaddr = dst_vaddr + len;
+		size -= len;
+	}
+err:
+	return ret;
+}
+
+static int sev_dbg_decrypt(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	return sev_dbg_crypt(kvm, argp, true);
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -6135,6 +6312,10 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 	}
 	case KVM_SEV_GUEST_STATUS: {
 		r = sev_guest_status(kvm, &sev_cmd);
+		break;
+	}
+	case KVM_SEV_DBG_DECRYPT: {
+		r = sev_dbg_decrypt(kvm, &sev_cmd);
 		break;
 	}
 	default:
