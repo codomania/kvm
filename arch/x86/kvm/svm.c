@@ -6201,6 +6201,99 @@ static int __sev_dbg_decrypt(struct kvm *kvm, unsigned long paddr,
 	return ret;
 }
 
+static int __sev_dbg_encrypt(struct kvm *kvm, unsigned long __user vaddr,
+			     unsigned long paddr, unsigned long __user dst_vaddr,
+			     unsigned long dst_paddr, int size, int *error)
+{
+	struct page *src_tpage = NULL;
+	struct page *dst_tpage = NULL;
+	int ret, len = size;
+
+	/*
+	 *  If source buffer is not 16-byte aligned then we copy the data from
+	 *  source buffer into a PAGE aligned intermediate (src_tpage) buffer
+	 *  and use this intermediate buffer as source buffer.
+	 */
+	if (!IS_ALIGNED(vaddr, 16)) {
+		src_tpage = alloc_page(GFP_KERNEL);
+		if (!src_tpage)
+			return -ENOMEM;
+
+		if (copy_from_user(page_address(src_tpage),
+			(void __user *)(uintptr_t)vaddr, size)) {
+			__free_page(src_tpage);
+			return -EFAULT;
+		}
+		paddr = __sme_page_pa(src_tpage);
+
+		clflush_cache_range(page_address(src_tpage), PAGE_SIZE);
+	}
+
+	/*
+	 *  If destination buffer or length is not 16-byte aligned then:
+	 *   - decrypt portion of destination buffer into intermediate buffer
+	 *     (dst_tpage)
+	 *   - copy the source data into intermediate buffer
+	 *   - use the intermediate buffer as source buffer
+	 */
+	if (!IS_ALIGNED(dst_vaddr, 16) ||
+	    !IS_ALIGNED(size, 16)) {
+		int dst_offset;
+
+		dst_tpage = alloc_page(GFP_KERNEL);
+		if (!dst_tpage) {
+			ret = -ENOMEM;
+			goto e_free;
+		}
+
+		/* decrypt destination buffer into intermediate buffer */
+		ret = __sev_dbg_decrypt(kvm,
+					round_down(dst_paddr, 16),
+					0,
+					(unsigned long)page_address(dst_tpage),
+					__sme_page_pa(dst_tpage),
+					round_up(size, 16),
+					error);
+		if (ret)
+			goto e_free;
+
+		dst_offset = dst_paddr & 15;
+
+		/*
+		 * modify the intermediate buffer with data from source buffer.
+		 */
+		if (src_tpage)
+			memcpy(page_address(dst_tpage) + dst_offset,
+			       page_address(src_tpage), size);
+		else {
+			if (copy_from_user(page_address(dst_tpage) + dst_offset,
+					   (void __user *)(uintptr_t)vaddr, size)) {
+				ret = -EFAULT;
+				goto e_free;
+			}
+		}
+
+
+		/* use intermediate buffer as source */
+		paddr = __sme_page_pa(dst_tpage);
+
+		clflush_cache_range(page_address(dst_tpage), PAGE_SIZE);
+
+		/* now we have length and destination buffer aligned */
+		dst_paddr = round_down(dst_paddr, 16);
+		len = round_up(size, 16);
+	}
+
+	ret = __sev_issue_dbg_cmd(kvm, paddr, dst_paddr, len, error, true);
+
+e_free:
+	if (src_tpage)
+		__free_page(src_tpage);
+	if (dst_tpage)
+		__free_page(dst_tpage);
+	return ret;
+}
+
 static int sev_dbg_crypt(struct kvm *kvm, struct kvm_sev_cmd *argp, bool dec)
 {
 	unsigned long vaddr, vaddr_end, next_vaddr;
@@ -6254,11 +6347,19 @@ static int sev_dbg_crypt(struct kvm *kvm, struct kvm_sev_cmd *argp, bool dec)
 		d_off = dst_vaddr & ~PAGE_MASK;
 		len = min_t(size_t, (PAGE_SIZE - s_off), size);
 
-		ret = __sev_dbg_decrypt(kvm,
-				       __sme_page_pa(src_p[0]) + s_off,
-				       dst_vaddr, 0,
-				       __sme_page_pa(dst_p[0]) + d_off,
-				       len, &argp->error);
+		if (dec)
+			ret = __sev_dbg_decrypt(kvm,
+						__sme_page_pa(src_p[0]) + s_off,
+						dst_vaddr, 0,
+						__sme_page_pa(dst_p[0]) + d_off,
+						len, &argp->error);
+		else
+			ret = __sev_dbg_encrypt(kvm,
+						vaddr,
+						__sme_page_pa(src_p[0]) + s_off,
+						dst_vaddr,
+						__sme_page_pa(dst_p[0]) + d_off,
+						len, &argp->error);
 
 		sev_unpin_memory(kvm, src_p, 1);
 		sev_unpin_memory(kvm, dst_p, 1);
@@ -6277,6 +6378,11 @@ err:
 static int sev_dbg_decrypt(struct kvm *kvm, struct kvm_sev_cmd *argp)
 {
 	return sev_dbg_crypt(kvm, argp, true);
+}
+
+static int sev_dbg_encrypt(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	return sev_dbg_crypt(kvm, argp, false);
 }
 
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
@@ -6316,6 +6422,10 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 	}
 	case KVM_SEV_DBG_DECRYPT: {
 		r = sev_dbg_decrypt(kvm, &sev_cmd);
+		break;
+	}
+	case KVM_SEV_DBG_ENCRYPT: {
+		r = sev_dbg_encrypt(kvm, &sev_cmd);
 		break;
 	}
 	default:
