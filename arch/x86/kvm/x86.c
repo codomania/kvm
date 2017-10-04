@@ -4276,6 +4276,30 @@ long kvm_arch_vm_ioctl(struct file *filp,
 			r = kvm_x86_ops->mem_enc_op(kvm, argp);
 		break;
 	}
+	case KVM_MEMORY_ENCRYPT_REG_REGION: {
+		struct kvm_enc_region region;
+
+		r = -EFAULT;
+		if (copy_from_user(&region, argp, sizeof(region)))
+			goto out;
+
+		r = -ENOTTY;
+		if (kvm_x86_ops->mem_enc_reg_region)
+			r = kvm_x86_ops->mem_enc_reg_region(kvm, &region);
+		break;
+	}
+	case KVM_MEMORY_ENCRYPT_UNREG_REGION: {
+		struct kvm_enc_region region;
+
+		r = -EFAULT;
+		if (copy_from_user(&region, argp, sizeof(region)))
+			goto out;
+
+		r = -ENOTTY;
+		if (kvm_x86_ops->mem_enc_unreg_region)
+			r = kvm_x86_ops->mem_enc_unreg_region(kvm, &region);
+		break;
+	}
 	default:
 		r = -ENOTTY;
 	}
