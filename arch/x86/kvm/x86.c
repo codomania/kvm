@@ -4018,6 +4018,24 @@ static int kvm_vm_ioctl_mem_enc_op(struct kvm *kvm, void __user *argp)
 	return -ENOTTY;
 }
 
+static int kvm_vm_ioctl_mem_enc_register_region(struct kvm *kvm,
+						struct kvm_enc_region *region)
+{
+	if (kvm_x86_ops->mem_enc_register_region)
+		return kvm_x86_ops->mem_enc_register_region(kvm, region);
+
+	return -ENOTTY;
+}
+
+static int kvm_vm_ioctl_mem_enc_unregister_region(struct kvm *kvm,
+						  struct kvm_enc_region *region)
+{
+	if (kvm_x86_ops->mem_enc_unregister_region)
+		return kvm_x86_ops->mem_enc_unregister_region(kvm, region);
+
+	return -ENOTTY;
+}
+
 long kvm_arch_vm_ioctl(struct file *filp,
 		       unsigned int ioctl, unsigned long arg)
 {
@@ -4280,6 +4298,24 @@ long kvm_arch_vm_ioctl(struct file *filp,
 	}
 	case KVM_MEMORY_ENCRYPT_OP: {
 		r = kvm_vm_ioctl_mem_enc_op(kvm, argp);
+		break;
+	}
+	case KVM_MEMORY_ENCRYPT_REGISTER_REGION: {
+		struct kvm_enc_region region;
+
+		r = -EFAULT;
+		if (copy_from_user(&region, argp, sizeof(region)))
+			goto out;
+		r = kvm_vm_ioctl_mem_enc_register_region(kvm, &region);
+		break;
+	}
+	case KVM_MEMORY_ENCRYPT_UNREGISTER_REGION: {
+		struct kvm_enc_region region;
+
+		r = -EFAULT;
+		if (copy_from_user(&region, argp, sizeof(region)))
+			goto out;
+		r = kvm_vm_ioctl_mem_enc_unregister_region(kvm, &region);
 		break;
 	}
 	default:
