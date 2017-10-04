@@ -1076,6 +1076,7 @@ struct kvm_x86_ops {
 	int (*mem_enc_op)(struct kvm *kvm, void __user *argp);
 	int (*mem_enc_reg_region)(struct kvm *kvm, struct kvm_enc_region *argp);
 	int (*mem_enc_unreg_region)(struct kvm *kvm, struct kvm_enc_region *argp);
+	bool (*mem_enc_enabled)(struct kvm_vcpu *vcpu);
 };
 
 struct kvm_arch_async_pf {
