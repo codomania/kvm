@@ -299,6 +299,85 @@ static int sev_ioctl_pdh_gen(struct sev_issue_cmd *argp)
 	return ret;
 }
 
+static int sev_ioctl_pek_csr(struct sev_issue_cmd *argp)
+{
+	struct sev_user_data_pek_csr input;
+	struct sev_data_pek_csr *data;
+	int do_shutdown = 0;
+	int ret, state;
+	void *blob;
+
+	if (copy_from_user(&input, (void __user *)(uintptr_t)argp->data,
+			   sizeof(struct sev_user_data_pek_csr)))
+		return -EFAULT;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	blob = NULL;
+	if (input.address) {
+		if (!access_ok(VERIFY_WRITE, input.address, input.length) ||
+		    input.length > SEV_FW_BLOB_MAX_SIZE) {
+			ret = -EFAULT;
+			goto e_free;
+		}
+
+		blob = kmalloc(input.length, GFP_KERNEL);
+		if (!blob) {
+			ret = -ENOMEM;
+			goto e_free;
+		}
+
+		data->address = __psp_pa(blob);
+		data->len = input.length;
+	}
+
+	ret = sev_platform_get_state(&state, &argp->error);
+	if (ret)
+		goto e_free_blob;
+
+	/*
+	 * PEK_CERT command can be issued only when platform is in INIT state.
+	 * if platform is in UNINIT then transition it to INIT state before
+	 * issuing the command.
+	 */
+	if (state == SEV_STATE_WORKING) {
+		ret = -EBUSY;
+		goto e_free_blob;
+	} else if (state == SEV_STATE_UNINIT) {
+		ret = sev_firmware_init(&argp->error);
+		if (ret)
+			goto e_free_blob;
+		do_shutdown = 1;
+	}
+
+	ret = sev_do_cmd(SEV_CMD_PEK_CSR, data, &argp->error);
+
+	input.length = data->len;
+
+	/* copy blob to userspace */
+	if (blob &&
+	    copy_to_user((void __user *)(uintptr_t)input.address,
+			blob, input.length)) {
+		ret = -EFAULT;
+		goto e_shutdown;
+	}
+
+	if (copy_to_user((void __user *)(uintptr_t)argp->data, &input,
+			 sizeof(struct sev_user_data_pek_csr)))
+		ret = -EFAULT;
+
+e_shutdown:
+	if (do_shutdown)
+		sev_do_cmd(SEV_CMD_SHUTDOWN, 0, NULL);
+e_free_blob:
+	kfree(blob);
+e_free:
+	kfree(data);
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -330,6 +409,10 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 	}
 	case SEV_PDH_GEN: {
 		ret = sev_ioctl_pdh_gen(&input);
+		break;
+	}
+	case SEV_PEK_CSR: {
+		ret = sev_ioctl_pek_csr(&input);
 		break;
 	}
 	default:
