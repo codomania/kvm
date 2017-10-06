@@ -271,6 +271,34 @@ static int sev_ioctl_pek_gen(struct sev_issue_cmd *argp)
 	return ret;
 }
 
+static int sev_ioctl_pdh_gen(struct sev_issue_cmd *argp)
+{
+	int ret, state, do_shutdown = 0;
+
+	/*
+	 * PDH_GEN command can be issued when platform is in INIT or WORKING
+	 * state. If we are in UNINIT state then transition to INIT state
+	 * before issuing the command.
+	 */
+	ret = sev_platform_get_state(&state, &argp->error);
+	if (ret)
+		return ret;
+
+	if (state == SEV_STATE_UNINIT) {
+		ret = sev_firmware_init(&argp->error);
+		if (ret)
+			return ret;
+		do_shutdown = 1;
+	}
+
+	ret = sev_do_cmd(SEV_CMD_PDH_GEN, 0, &argp->error);
+
+	if (do_shutdown)
+		sev_do_cmd(SEV_CMD_SHUTDOWN, 0, NULL);
+
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -298,6 +326,10 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 	}
 	case SEV_PEK_GEN: {
 		ret = sev_ioctl_pek_gen(&input);
+		break;
+	}
+	case SEV_PDH_GEN: {
+		ret = sev_ioctl_pdh_gen(&input);
 		break;
 	}
 	default:
