@@ -207,6 +207,70 @@ e_free:
 	return ret;
 }
 
+static int sev_platform_get_state(int *state, int *error)
+{
+	struct sev_data_status *data;
+	int ret;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	ret = sev_do_cmd(SEV_CMD_PLATFORM_STATUS, data, error);
+	if (!ret)
+		*state = data->state;
+
+	kfree(data);
+	return ret;
+}
+
+static int sev_firmware_init(int *error)
+{
+	struct sev_data_init *data;
+	int rc;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	rc = sev_do_cmd(SEV_CMD_INIT, data, error);
+
+	kfree(data);
+	return rc;
+}
+
+static int sev_ioctl_pek_gen(struct sev_issue_cmd *argp)
+{
+	int do_shutdown = 0;
+	int ret, state;
+
+	/*
+	 * PEK_GEN command can be issued only when firmware is in INIT state.
+	 * If firmware is in UNINIT state then we transition to INIT state
+	 * and issue the command.
+	 */
+	ret = sev_platform_get_state(&state, &argp->error);
+	if (ret)
+		return ret;
+
+	if (state == SEV_STATE_WORKING) {
+		return -EBUSY;
+	} else if (state == SEV_STATE_UNINIT) {
+		ret = sev_firmware_init(&argp->error);
+		if (ret)
+			return ret;
+
+		do_shutdown = 1;
+	}
+
+	ret = sev_do_cmd(SEV_CMD_PEK_GEN, 0, &argp->error);
+
+	if (do_shutdown)
+		sev_do_cmd(SEV_CMD_SHUTDOWN, 0, NULL);
+
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -230,6 +294,10 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 	}
 	case SEV_PLATFORM_STATUS: {
 		ret = sev_ioctl_platform_status(&input);
+		break;
+	}
+	case SEV_PEK_GEN: {
+		ret = sev_ioctl_pek_gen(&input);
 		break;
 	}
 	default:
