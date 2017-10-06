@@ -179,7 +179,34 @@ unlock:
 
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
-	return -ENOTTY;
+	void __user *argp = (void __user *)arg;
+	struct sev_issue_cmd input;
+	int ret = -EFAULT;
+
+	if (ioctl != SEV_ISSUE_CMD)
+		return -EINVAL;
+
+	if (copy_from_user(&input, argp, sizeof(struct sev_issue_cmd)))
+		return -EFAULT;
+
+	if (input.cmd > SEV_MAX)
+		return -EINVAL;
+
+	switch (input.cmd) {
+
+	case SEV_FACTORY_RESET: {
+		ret = sev_do_cmd(SEV_CMD_FACTORY_RESET, 0, &input.error);
+		break;
+	}
+	default:
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (copy_to_user(argp, &input, sizeof(struct sev_issue_cmd)))
+		ret = -EFAULT;
+out:
+	return ret;
 }
 
 static const struct file_operations sev_fops = {
