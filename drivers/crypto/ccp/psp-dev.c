@@ -359,6 +359,102 @@ e_free:
 	return ret;
 }
 
+static int sev_ioctl_do_pdh_cert_export(struct sev_issue_cmd *argp)
+{
+	struct sev_user_data_pdh_cert_export input;
+	void *pdh_blob = NULL, *cert_blob = NULL;
+	struct sev_data_pdh_cert_export *data;
+	int ret, err;
+
+	if (copy_from_user(&input, (void __user *)argp->data, sizeof(input)))
+		return -EFAULT;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* Userspace wants to query the certificate length */
+	if (!input.pdh_cert_address || !input.pdh_cert_len ||
+	    !input.cert_chain_address || !input.cert_chain_address)
+		goto cmd;
+
+	/* allocate a physically contiguous buffer to store the PDH blob */
+	if (!access_ok(VERIFY_WRITE, input.pdh_cert_address, input.pdh_cert_len) ||
+	    (input.pdh_cert_len > SEV_FW_BLOB_MAX_SIZE)) {
+		ret = -EFAULT;
+		goto e_free;
+	}
+
+	pdh_blob = kmalloc(input.pdh_cert_len, GFP_KERNEL);
+	if (!pdh_blob) {
+		ret = -ENOMEM;
+		goto e_free;
+	}
+
+	data->pdh_cert_address = __psp_pa(pdh_blob);
+	data->pdh_cert_len = input.pdh_cert_len;
+
+	/* allocate a physically contiguous buffer to store the cert chain blob */
+	if (!access_ok(VERIFY_WRITE, input.cert_chain_address, input.cert_chain_len) ||
+	    (input.cert_chain_len > SEV_FW_BLOB_MAX_SIZE)) {
+		ret = -EFAULT;
+		goto e_free_pdh;
+	}
+
+	cert_blob = kmalloc(input.cert_chain_len, GFP_KERNEL);
+	if (!cert_blob) {
+		ret = -ENOMEM;
+		goto e_free_pdh;
+	}
+
+	data->cert_chain_address = __psp_pa(cert_blob);
+	data->cert_chain_len = input.cert_chain_len;
+
+cmd:
+	ret = sev_platform_init(NULL, &argp->error);
+	if (ret)
+		goto e_free_cert;
+
+	ret = sev_do_cmd(SEV_CMD_PDH_CERT_EXPORT, data, &argp->error);
+
+	/*
+	 * If we query the length, FW responded with expected data
+	 */
+	input.cert_chain_len = data->cert_chain_len;
+	input.pdh_cert_len = data->pdh_cert_len;
+
+	if (copy_to_user((void __user *)argp->data, &input, sizeof(input)))
+		ret = -EFAULT;
+
+	if (sev_platform_shutdown(&err)) {
+		ret = -EIO;
+		argp->error = err;
+		goto e_free_cert;
+	}
+
+	if (pdh_blob) {
+		if (copy_to_user((void __user *)input.pdh_cert_address,
+				 pdh_blob, input.pdh_cert_len)) {
+			ret = -EFAULT;
+			goto e_free_cert;
+		}
+	}
+
+	if (cert_blob) {
+		if (copy_to_user((void __user *)input.cert_chain_address,
+				 cert_blob, input.cert_chain_len))
+			ret = -EFAULT;
+	}
+
+e_free_cert:
+	kfree(cert_blob);
+e_free_pdh:
+	kfree(pdh_blob);
+e_free:
+	kfree(data);
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -393,6 +489,9 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 		break;
 	case SEV_PEK_CERT_IMPORT:
 		ret = sev_ioctl_do_pek_cert_import(&input);
+		break;
+	case SEV_PDH_CERT_EXPORT:
+		ret = sev_ioctl_do_pdh_cert_export(&input);
 		break;
 	default:
 		ret = -EINVAL;
