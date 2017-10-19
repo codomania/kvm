@@ -174,6 +174,27 @@ static int sev_do_cmd(int cmd, void *data, int *psp_ret)
 	return ret;
 }
 
+static int sev_ioctl_do_platform_status(struct sev_issue_cmd *argp)
+{
+	struct sev_user_data_status *data;
+	int ret;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	ret = sev_do_cmd(SEV_CMD_PLATFORM_STATUS, data, &argp->error);
+	if (ret)
+		goto e_free;
+
+	if (copy_to_user((void __user *)argp->data, data, sizeof(*data)))
+		ret = -EFAULT;
+
+e_free:
+	kfree(data);
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -193,6 +214,9 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 
 	case SEV_FACTORY_RESET:
 		ret = sev_do_cmd(SEV_CMD_FACTORY_RESET, 0, &input.error);
+		break;
+	case SEV_PLATFORM_STATUS:
+		ret = sev_ioctl_do_platform_status(&input);
 		break;
 	default:
 		ret = -EINVAL;
