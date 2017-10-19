@@ -195,6 +195,24 @@ e_free:
 	return ret;
 }
 
+static int sev_ioctl_do_pek_pdh_gen(int cmd, struct sev_issue_cmd *argp)
+{
+	int ret, err;
+
+	ret = sev_platform_init(NULL, &argp->error);
+	if (ret)
+		return ret;
+
+	ret = sev_do_cmd(cmd, 0, &argp->error);
+
+	if (sev_platform_shutdown(&err)) {
+		argp->error = err;
+		ret = -EIO;
+	}
+
+	return ret;
+}
+
 static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -217,6 +235,9 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 		break;
 	case SEV_PLATFORM_STATUS:
 		ret = sev_ioctl_do_platform_status(&input);
+		break;
+	case SEV_PEK_GEN:
+		ret = sev_ioctl_do_pek_pdh_gen(SEV_CMD_PEK_GEN, &input);
 		break;
 	default:
 		ret = -EINVAL;
