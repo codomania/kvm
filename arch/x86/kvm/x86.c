@@ -4270,6 +4270,12 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = kvm_vm_ioctl_enable_cap(kvm, &cap);
 		break;
 	}
+	case KVM_MEMORY_ENCRYPT_OP: {
+		r = -ENOTTY;
+		if (kvm_x86_ops->mem_enc_op)
+			r = kvm_x86_ops->mem_enc_op(kvm, argp);
+		break;
+	}
 	default:
 		r = -ENOTTY;
 	}
