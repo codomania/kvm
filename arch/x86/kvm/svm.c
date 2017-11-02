@@ -284,6 +284,10 @@ module_param(vls, int, 0444);
 static int vgif = true;
 module_param(vgif, int, 0444);
 
+/* enable/disable SEV support */
+static int sev = IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT_ACTIVE_BY_DEFAULT);
+module_param(sev, int, 0444);
+
 static void svm_set_cr0(struct kvm_vcpu *vcpu, unsigned long cr0);
 static void svm_flush_tlb(struct kvm_vcpu *vcpu);
 static void svm_complete_interrupts(struct vcpu_svm *svm);
@@ -1049,6 +1053,15 @@ static int avic_ga_log_notifier(u32 ga_tag)
 	return 0;
 }
 
+/*
+ * Get the maximum number of encrypted guests:
+ *  Fn8001_001F[ECX][31:0]: Number of supported guests.
+ */
+static __init void sev_hardware_setup(void)
+{
+	max_sev_asid = cpuid_ecx(0x8000001F);
+}
+
 static __init int svm_hardware_setup(void)
 {
 	int cpu;
@@ -1082,6 +1095,16 @@ static __init int svm_hardware_setup(void)
 	if (nested) {
 		printk(KERN_INFO "kvm: Nested Virtualization enabled\n");
 		kvm_enable_efer_bits(EFER_SVME | EFER_LMSLE);
+	}
+
+	if (sev) {
+		if (boot_cpu_has(X86_FEATURE_SEV) &&
+		    IS_ENABLED(CONFIG_KVM_AMD_SEV)) {
+			sev_hardware_setup();
+			pr_info("SEV supported\n");
+		} else {
+			sev = false;
+		}
 	}
 
 	for_each_possible_cpu(cpu) {
