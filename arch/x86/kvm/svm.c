@@ -6135,7 +6135,9 @@ static int sev_launch_measure(struct kvm *kvm, struct kvm_sev_cmd *argp)
 			goto e_free;
 		}
 
-		if (!access_ok(VERIFY_WRITE, params.uaddr, params.len)) {
+		if (!access_ok(VERIFY_WRITE,
+			       (void __user *)(uintptr_t)params.uaddr,
+			       params.len)) {
 			ret = -EFAULT;
 			goto e_free;
 		}
