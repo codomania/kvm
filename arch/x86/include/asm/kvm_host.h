@@ -768,6 +768,8 @@ struct kvm_sev_info {
 	int fd;			/* SEV device fd */
 	unsigned long pages_locked; /* Number of pages locked */
 	struct list_head regions_list;  /* List of registered regions */
+	unsigned long *unenc_map;
+	unsigned long unenc_map_size;
 };
 
 struct kvm_arch {
@@ -1097,6 +1099,8 @@ struct kvm_x86_ops {
 	int (*mem_enc_op)(struct kvm *kvm, void __user *argp);
 	int (*mem_enc_reg_region)(struct kvm *kvm, struct kvm_enc_region *argp);
 	int (*mem_enc_unreg_region)(struct kvm *kvm, struct kvm_enc_region *argp);
+	int (*unenc_gpa_range_hc)(struct kvm *kvm, unsigned long gpa,
+			          unsigned long sz, unsigned long mode);
 };
 
 struct kvm_arch_async_pf {

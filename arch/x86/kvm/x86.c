@@ -6427,6 +6427,13 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		ret = kvm_pv_clock_pairing(vcpu, a0, a1);
 		break;
 #endif
+#ifdef CONFIG_KVM_AMD_SEV
+	case KVM_HC_UNENCRYPTED_GPA_RANGE:
+		if (kvm_x86_ops->unenc_gpa_range_hc)
+			kvm_x86_ops->unenc_gpa_range_hc(vcpu->kvm, a0, a1, a2);
+		ret = 0;
+		break;
+#endif
 	default:
 		ret = -KVM_ENOSYS;
 		break;

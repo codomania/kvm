@@ -1707,6 +1707,8 @@ static void sev_vm_destroy(struct kvm *kvm)
 
 	sev_unbind_asid(kvm, sev->handle);
 	sev_asid_free(kvm);
+
+	kvfree(sev->unenc_map);
 }
 
 static void avic_vm_destroy(struct kvm *kvm)
@@ -7081,6 +7083,67 @@ failed:
 	return ret;
 }
 
+static int sev_resize_unenc_bitmap(struct kvm *kvm, unsigned long new_size)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	unsigned long *map;
+	unsigned long sz;
+
+	if (sev->unenc_map_size > new_size)
+		return 0;
+
+	sz = ALIGN(new_size, BITS_PER_LONG) / 8;
+
+	if (sz > PAGE_SIZE)
+		map = vzalloc(sz);
+	else
+		map = kzalloc(sz, GFP_KERNEL);
+
+	if (!map) {
+		pr_err("Failed to allocate unencrypted bitmap size %lx\n", sz);
+		return 1;
+	}
+
+	bitmap_copy(map, sev->unenc_map, sev->unenc_map_size);
+	kvfree(sev->unenc_map);
+
+	pr_info("%s: %lx -> %lx\n", __func__, sev->unenc_map_size, new_size);
+	sev->unenc_map = map;
+	sev->unenc_map_size = new_size;
+
+	return 0;
+}
+
+static int svm_unenc_gpa_range_hc(struct kvm *kvm, unsigned long gpa,
+				  unsigned long size, unsigned long dec)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	gfn_t gfn_start, gfn_end;
+	int r;
+
+	if (!size || (dec < 0 || dec >= 2))
+		return 0;
+
+	gfn_start = gpa_to_gfn(gpa);
+	gfn_end = gpa_to_gfn(gpa + size);
+
+	mutex_lock(&kvm->lock);
+
+	r = 1;
+	if (sev_resize_unenc_bitmap(kvm, gfn_end))
+		goto unlock;
+
+	if (dec)
+		__bitmap_set(sev->unenc_map, gfn_start, gfn_end - gfn_start);
+	else
+		__bitmap_clear(sev->unenc_map, gfn_start, gfn_end - gfn_start);
+
+	r = 0;
+unlock:
+	mutex_unlock(&kvm->lock);
+	return r;
+}
+
 static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.cpu_has_kvm_support = has_svm,
 	.disabled_by_bios = is_disabled,
@@ -7203,6 +7266,7 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.mem_enc_op = svm_mem_enc_op,
 	.mem_enc_reg_region = svm_register_enc_region,
 	.mem_enc_unreg_region = svm_unregister_enc_region,
+	.unenc_gpa_range_hc = svm_unenc_gpa_range_hc
 };
 
 static int __init svm_init(void)
