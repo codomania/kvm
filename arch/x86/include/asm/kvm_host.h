@@ -1101,6 +1101,7 @@ struct kvm_x86_ops {
 	int (*mem_enc_unreg_region)(struct kvm *kvm, struct kvm_enc_region *argp);
 	int (*unenc_gpa_range_hc)(struct kvm *kvm, unsigned long gpa,
 			          unsigned long sz, unsigned long mode);
+	int (*get_unencrypted_bitmap)(struct kvm *kvm, struct kvm_unencrypted_bitmap *bmap);
 };
 
 struct kvm_arch_async_pf {

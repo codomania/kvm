@@ -4384,6 +4384,18 @@ set_identity_unlock:
 			r = kvm_x86_ops->mem_enc_unreg_region(kvm, &region);
 		break;
 	}
+	case KVM_GET_UNENCRYPTED_BITMAP: {
+		struct kvm_unencrypted_bitmap bitmap;
+
+		r = -EFAULT;
+		if (copy_from_user(&bitmap, argp, sizeof(bitmap)))
+			goto out;
+
+		r = -ENOTTY;
+		if (kvm_x86_ops->get_unencrypted_bitmap)
+			r = kvm_x86_ops->get_unencrypted_bitmap(kvm, &bitmap);
+		break;
+	}
 	default:
 		r = -ENOTTY;
 	}
