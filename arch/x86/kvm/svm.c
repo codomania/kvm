@@ -6923,6 +6923,82 @@ static int sev_receive_finish(struct kvm *kvm, struct kvm_sev_cmd *argp)
 	return ret;
 }
 
+static int sev_set_unencrypted_bitmap(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	struct kvm_sev_unencrypted_bitmap params;
+	unsigned long nbytes, *map;
+	int ret;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	if (copy_from_user(&params, (void __user *)(uintptr_t)argp->data,
+			sizeof(struct kvm_sev_unencrypted_bitmap)))
+		return -EFAULT;
+
+	if (!params.nbits)
+		return -EINVAL;
+
+	nbytes = ALIGN(params.nbits, BITS_PER_LONG) / 8;
+	map = vmalloc(nbytes);
+	if (!map)
+		return -ENOMEM;
+
+	ret = -EFAULT;
+	if (copy_from_user(map, (void * __user)(uintptr_t) params.bitmap, nbytes))
+		goto e_free;
+
+	if (sev->unenc_map)
+		kvfree(sev->unenc_map);
+
+	sev->unenc_map = map;
+	sev->unenc_map_size = params.nbits;
+
+	return 0;
+e_free:
+	kvfree(map);
+	return ret;
+}
+
+static int sev_get_unencrypted_bitmap(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &kvm->arch.sev_info;
+	struct kvm_sev_unencrypted_bitmap params;
+	unsigned long nbytes;
+	int ret;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	/* we don't have unencrypted bitmap */
+	if (!sev->unenc_map)
+		return 0;
+
+	if (copy_from_user(&params, (void __user *)(uintptr_t)argp->data,
+			sizeof(struct kvm_sev_unencrypted_bitmap)))
+		return -EFAULT;
+
+	/* command may want to query the size */
+	if (!params.nbits) {
+		params.nbits = sev->unenc_map_size;
+		goto done;
+	}
+
+	ret = -EFAULT;
+	nbytes = ALIGN(min_t(unsigned long, params.nbits, sev->unenc_map_size), BITS_PER_LONG) / 8;
+	if (copy_to_user((void __user *)(uintptr_t)params.bitmap,
+			 sev->unenc_map, nbytes))
+		goto err;
+done:
+	ret = 0;
+	if (copy_to_user((void __user *)(uintptr_t)argp->data,
+			 &params, sizeof(struct kvm_sev_unencrypted_bitmap)))
+		ret = -EFAULT;
+err:
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -6981,6 +7057,12 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 		break;
 	case KVM_SEV_RECEIVE_FINISH:
 		r = sev_receive_finish(kvm, &sev_cmd);
+		break;
+	case KVM_SEV_GET_UNENCRYPTED_BITMAP:
+		r = sev_get_unencrypted_bitmap(kvm, &sev_cmd);
+		break;
+	case KVM_SEV_SET_UNENCRYPTED_BITMAP:
+		r = sev_set_unencrypted_bitmap(kvm, &sev_cmd);
 		break;
 	default:
 		r = -EINVAL;
@@ -7158,6 +7240,9 @@ static int svm_get_unencrypted_bitmap(struct kvm *kvm,
 	if (!sev_guest(kvm))
 		return -ENOTTY;
 
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
 	as_id = bmap->slot >> 16;
 	id = (u16)bmap->slot;
 	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_USER_MEM_SLOTS)
@@ -7329,7 +7414,7 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.mem_enc_reg_region = svm_register_enc_region,
 	.mem_enc_unreg_region = svm_unregister_enc_region,
 	.unenc_gpa_range_hc = svm_unenc_gpa_range_hc,
-	.get_unencrypted_bitmap = svm_get_unencrypted_bitmap
+	.get_unencrypted_bitmap = svm_get_unencrypted_bitmap,
 };
 
 static int __init svm_init(void)

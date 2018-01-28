@@ -1408,6 +1408,10 @@ enum sev_cmd_id {
 	/* Guest certificates commands */
 	KVM_SEV_CERT_EXPORT,
 
+	/* Command to retrive the unencryptd bitmap maintained by KVM */
+	KVM_SEV_GET_UNENCRYPTED_BITMAP,
+	KVM_SEV_SET_UNENCRYPTED_BITMAP,
+
 	KVM_SEV_NR_MAX,
 };
 
@@ -1496,6 +1500,11 @@ struct kvm_sev_receive_update_data {
 	__u32 guest_len;
 	__u64 trans_uaddr;
 	__u32 trans_len;
+};
+
+struct kvm_sev_unencrypted_bitmap {
+	__u64 nbits;
+	void __user *bitmap; /* one bit per page */
 };
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)
