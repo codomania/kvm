@@ -91,4 +91,7 @@ early_set_memory_encrypted(unsigned long vaddr, unsigned long size) { return 0; 
 
 #endif	/* __ASSEMBLY__ */
 
+extern void set_memory_enc_dec_hypercall(unsigned long vaddr,
+					 unsigned long size, bool enc);
+
 #endif	/* __X86_MEM_ENCRYPT_H__ */
