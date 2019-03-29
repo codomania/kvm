@@ -7711,6 +7711,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
 	.set_nested_state = NULL,
 	.get_vmcs12_pages = NULL,
 	.nested_enable_evmcs = NULL,
+	.set_page_enc_hc = NULL,
 };
 
 static void vmx_cleanup_l1d_flush(void)

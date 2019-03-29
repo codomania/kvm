@@ -1192,6 +1192,8 @@ struct kvm_x86_ops {
 	int (*nested_enable_evmcs)(struct kvm_vcpu *vcpu,
 				   uint16_t *vmcs_version);
 	uint16_t (*nested_get_evmcs_version)(struct kvm_vcpu *vcpu);
+	int (*set_page_enc_hc)(struct kvm *kvm, unsigned long gpa,
+				unsigned long sz, unsigned long mode);
 };
 
 struct kvm_arch_async_pf {

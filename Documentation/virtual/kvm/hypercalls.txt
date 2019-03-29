@@ -141,3 +141,17 @@ a0 corresponds to the APIC ID in the third argument (a2), bit 1
 corresponds to the APIC ID a2+1, and so on.
 
 Returns the number of CPUs to which the IPIs were delivered successfully.
+
+7. KVM_HC_SET_PAGE_ENC
+----------------------
+Architecture: x86
+Status: active
+Purpose: Notify the encryption attribute updates in the guest page table (SEV guest)
+
+a0: the guest physical address of the start page
+a1: the number of pages
+a2: set or clear the encryption attribute
+
+   Where:
+	* 1: Encryption attribute is cleared
+	* 0: Encryption attribute is set
