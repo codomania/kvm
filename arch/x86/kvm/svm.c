@@ -6940,6 +6940,103 @@ e_unpin_memory:
 	return ret;
 }
 
+static int sev_send_start(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	void *amd_cert = NULL, *session_data = NULL;
+	void *pdh_cert = NULL, *plat_cert = NULL;
+	struct sev_data_send_start *data = NULL;
+	struct kvm_sev_send_start params;
+	int ret;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	if (copy_from_user(&params, (void __user *)(uintptr_t)argp->data,
+				sizeof(struct kvm_sev_send_start)))
+		return -EFAULT;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* userspace wants to query the session length */
+	if (!params.session_len)
+		goto cmd;
+
+	if (!params.pdh_cert_uaddr || !params.pdh_cert_len ||
+	    !params.session_uaddr)
+		return -EINVAL;
+
+	/* copy the certificate blobs from userspace */
+	pdh_cert = psp_copy_user_blob(params.pdh_cert_uaddr, params.pdh_cert_len);
+	if (IS_ERR(pdh_cert)) {
+		ret = PTR_ERR(pdh_cert);
+		goto e_free;
+	}
+
+	data->pdh_cert_address = __psp_pa(pdh_cert);
+	data->pdh_cert_len = params.pdh_cert_len;
+
+	if (params.plat_cert_uaddr) {
+		plat_cert = psp_copy_user_blob(params.plat_cert_uaddr, params.plat_cert_len);
+		if (IS_ERR(plat_cert)) {
+			ret = PTR_ERR(plat_cert);
+			goto e_free;
+		}
+
+		data->plat_cert_address = __psp_pa(plat_cert);
+		data->plat_cert_len = params.plat_cert_len;
+	}
+
+	if (params.amd_cert_uaddr) {
+		amd_cert = psp_copy_user_blob(params.amd_cert_uaddr, params.amd_cert_len);
+		if (IS_ERR(amd_cert)) {
+			ret = PTR_ERR(amd_cert);
+			goto e_free;
+		}
+
+		data->amd_cert_address = __psp_pa(amd_cert);
+		data->amd_cert_len = params.amd_cert_len;
+	}
+
+	ret = -ENOMEM;
+	session_data = kmalloc(params.session_len, GFP_KERNEL);
+	if (!session_data)
+		goto e_free;
+
+	data->session_address = __psp_pa(session_data);
+	data->session_len = params.session_len;
+cmd:
+	data->handle = sev->handle;
+	ret = sev_issue_cmd(kvm, SEV_CMD_SEND_START, data, &argp->error);
+
+	/* if we queried the session length, FW responded with expected data */
+	if (!params.session_len)
+		goto done;
+
+	if (copy_to_user((void __user*)(uintptr_t) params.session_uaddr,
+			session_data, params.session_len)) {
+		ret = -EFAULT;
+		goto e_free;
+	}
+
+	params.policy = data->policy;
+
+done:
+	params.session_len = data->session_len;
+	if (copy_to_user((void __user *)(uintptr_t)argp->data, &params,
+				sizeof(struct kvm_sev_send_start)))
+		ret = -EFAULT;
+e_free:
+	kfree(pdh_cert);
+	kfree(plat_cert);
+	kfree(amd_cert);
+	kfree(session_data);
+	kfree(data);
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -6980,6 +7077,9 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 		break;
 	case KVM_SEV_LAUNCH_SECRET:
 		r = sev_launch_secret(kvm, &sev_cmd);
+		break;
+	case KVM_SEV_SEND_START:
+		r = sev_send_start(kvm, &sev_cmd);
 		break;
 	default:
 		r = -EINVAL;
