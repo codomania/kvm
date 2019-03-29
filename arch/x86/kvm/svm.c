@@ -7037,6 +7037,110 @@ e_free:
 	return ret;
 }
 
+static int sev_send_update_data(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	struct sev_data_send_update_data *data;
+	struct kvm_sev_send_update_data params;
+	void *hdr = NULL, *trans_data = NULL;
+	struct page **guest_page = NULL;
+	unsigned long n;
+	int ret, offset;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	if (copy_from_user(&params, (void __user*)(uintptr_t)argp->data,
+			sizeof(struct kvm_sev_send_update_data)))
+		return -EFAULT;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* userspace wants to query either header or trans length */
+	if (!params.trans_len || !params.hdr_len)
+		goto cmd;
+
+	ret = -EINVAL;
+	if (!params.trans_uaddr || !params.guest_uaddr ||
+	    !params.guest_len || !params.hdr_uaddr)
+		goto e_free;
+
+	/* Check if we are crossing the page boundry */
+	ret = -EINVAL;
+	offset = params.guest_uaddr & (PAGE_SIZE - 1);
+	if ((params.guest_len + offset > PAGE_SIZE))
+		goto e_free;
+
+	ret = -ENOMEM;
+	hdr = kmalloc(params.hdr_len, GFP_KERNEL);
+	if (!hdr)
+		goto e_free;
+
+	data->hdr_address = __psp_pa(hdr);
+	data->hdr_len = params.hdr_len;
+
+	ret = -ENOMEM;
+	trans_data = kmalloc(params.trans_len, GFP_KERNEL);
+	if (!trans_data)
+		goto e_free;
+
+	data->trans_address = __psp_pa(trans_data);
+	data->trans_len = params.trans_len;
+
+	/* Pin guest memory */
+	ret = -EFAULT;
+	guest_page = sev_pin_memory(kvm, params.guest_uaddr & PAGE_MASK,
+				    PAGE_SIZE, &n, 0);
+	if (!guest_page)
+		goto e_free;
+
+	data->guest_address = __sme_page_pa(guest_page[0]) + offset;
+	data->guest_len = params.guest_len;
+
+	/* flush the caches to ensure that DRAM has recent contents */
+	sev_clflush_pages(guest_page, 1);
+
+cmd:
+	data->handle = sev->handle;
+	ret = sev_issue_cmd(kvm, SEV_CMD_SEND_UPDATE_DATA, data, &argp->error);
+
+	/* userspace asked for header or trans length and FW responded with data */
+	if (!params.trans_len || !params.hdr_len) {
+		params.hdr_len = data->hdr_len;
+		params.trans_len = data->trans_len;
+		goto done;
+	}
+
+	if (ret)
+		goto e_unpin;
+
+	/* copy transport buffer to user space */
+	if (copy_to_user((void __user *)(uintptr_t)params.trans_uaddr,
+			 trans_data, params.trans_len)) {
+		ret = -EFAULT;
+		goto e_unpin;
+	}
+
+	/* copy packet header to userspace */
+	if (copy_to_user((void __user *)(uintptr_t)params.hdr_uaddr, hdr, params.hdr_len))
+		ret = -EFAULT;
+
+e_unpin:
+	sev_unpin_memory(kvm, guest_page, n);
+done:
+	if (copy_to_user((void __user *)(uintptr_t)argp->data, &params,
+			sizeof(struct kvm_sev_send_update_data)))
+		ret = -EFAULT;
+e_free:
+	kfree(data);
+	kfree(trans_data);
+	kfree(hdr);
+
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -7080,6 +7184,9 @@ static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 		break;
 	case KVM_SEV_SEND_START:
 		r = sev_send_start(kvm, &sev_cmd);
+		break;
+	case KVM_SEV_SEND_UPDATE_DATA:
+		r = sev_send_update_data(kvm, &sev_cmd);
 		break;
 	default:
 		r = -EINVAL;
