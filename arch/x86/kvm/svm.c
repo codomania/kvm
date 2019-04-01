@@ -7392,6 +7392,68 @@ unlock:
 	return r;
 }
 
+static int svm_get_page_enc_bitmap(struct kvm *kvm,
+				   struct kvm_page_enc_bitmap *bmap)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	unsigned long *bitmap, *bitmap_buffer;
+	struct kvm_memory_slot *memslot;
+	struct kvm_memslots *slots;
+	unsigned long gfn_start, gfn_end;
+	int ret, as_id, id, j;
+	unsigned long sz, i;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	as_id = bmap->slot >> 16;
+	id = (u16)bmap->slot;
+	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_USER_MEM_SLOTS)
+		return -EINVAL;
+
+	slots = __kvm_memslots(kvm, as_id);
+	memslot = id_to_memslot(slots, id);
+
+	gfn_start = memslot->base_gfn;
+	gfn_end = gfn_start + memslot->npages;
+
+	sz = ALIGN(memslot->npages, BITS_PER_LONG) / 8;
+	bitmap = kzalloc(2 * sz, GFP_KERNEL);
+	if (!bitmap)
+		return -ENOMEM;
+
+	mutex_lock(&kvm->lock);
+
+	i = gfn_start;
+	for_each_set_bit_from(i, sev->page_enc_map,
+			      min(sev->page_enc_map_size, gfn_end))
+		set_bit(i - gfn_start, bitmap);
+
+	/* build bitmap for userspace */
+	bitmap_buffer = bitmap + sz / sizeof(long);
+	memset(bitmap_buffer, 0, sz);
+
+	for (j = 0; j < sz / sizeof(long); j++) {
+		unsigned long mask;
+
+		if (!bitmap[j])
+			continue;
+
+		mask = xchg(&bitmap[j], 0);
+		bitmap_buffer[j] = mask;
+	}
+
+	ret = -EFAULT;
+	if (copy_to_user(bmap->enc_bitmap, bitmap_buffer, sz))
+		goto out;
+
+	ret = 0;
+out:
+	mutex_unlock(&kvm->lock);
+	kfree(bitmap);
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -7702,7 +7764,8 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.nested_enable_evmcs = nested_enable_evmcs,
 	.nested_get_evmcs_version = nested_get_evmcs_version,
 
-	.set_page_enc_hc = svm_set_page_enc_hc
+	.set_page_enc_hc = svm_set_page_enc_hc,
+	.get_page_enc_bitmap = svm_get_page_enc_bitmap
 };
 
 static int __init svm_init(void)

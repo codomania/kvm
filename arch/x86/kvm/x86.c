@@ -4867,6 +4867,18 @@ set_identity_unlock:
 		r = kvm_vm_ioctl_hv_eventfd(kvm, &hvevfd);
 		break;
 	}
+	case KVM_GET_PAGE_ENC_BITMAP: {
+		struct kvm_page_enc_bitmap bitmap;
+
+		r = -EFAULT;
+		if (copy_from_user(&bitmap, argp, sizeof(bitmap)))
+			goto out;
+
+		r = -ENOTTY;
+		if (kvm_x86_ops->get_page_enc_bitmap)
+			r = kvm_x86_ops->get_page_enc_bitmap(kvm, &bitmap);
+		break;
+	}
 	default:
 		r = -ENOTTY;
 	}
