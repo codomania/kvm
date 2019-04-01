@@ -97,4 +97,7 @@ extern char __start_bss_decrypted[], __end_bss_decrypted[], __start_bss_decrypte
 
 #endif	/* __ASSEMBLY__ */
 
+extern void set_memory_enc_dec_hypercall(unsigned long vaddr,
+					 unsigned long size, bool enc);
+
 #endif	/* __X86_MEM_ENCRYPT_H__ */
