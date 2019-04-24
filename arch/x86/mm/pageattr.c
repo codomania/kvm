@@ -25,6 +25,7 @@
 #include <asm/proto.h>
 #include <asm/pat.h>
 #include <asm/set_memory.h>
+#include <asm/mem_encrypt.h>
 
 #include "mm_internal.h"
 
@@ -2019,6 +2020,12 @@ int set_memory_global(unsigned long addr, int numpages)
 				    __pgprot(_PAGE_GLOBAL), 0);
 }
 
+void __attribute__((weak)) set_memory_enc_dec_hypercall(unsigned long addr,
+							unsigned long size,
+							bool enc)
+{
+}
+
 static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
 {
 	struct cpa_data cpa;
@@ -2058,6 +2065,14 @@ static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
 	 * as above.
 	 */
 	cpa_flush(&cpa, 0);
+
+	/*
+	 * When SEV is active, notify hypervisor that a given memory range is mapped
+	 * encrypted or decrypted. Hypervisor will use this information during
+	 * the VM migration.
+	 */
+	if (sev_active())
+		set_memory_enc_dec_hypercall(addr, numpages << PAGE_SHIFT, enc);
 
 	return ret;
 }
