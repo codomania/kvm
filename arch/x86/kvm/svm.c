@@ -138,6 +138,8 @@ struct kvm_sev_info {
 	int fd;			/* SEV device fd */
 	unsigned long pages_locked; /* Number of pages locked */
 	struct list_head regions_list;  /* List of registered regions */
+	unsigned long *page_enc_bmap;
+	unsigned long page_enc_bmap_size;
 };
 
 struct kvm_svm {
@@ -1911,6 +1913,8 @@ static void sev_vm_destroy(struct kvm *kvm)
 
 	sev_unbind_asid(kvm, sev->handle);
 	sev_asid_free(kvm);
+
+	kvfree(sev->page_enc_bmap);
 }
 
 static void avic_vm_destroy(struct kvm *kvm)
@@ -7370,6 +7374,69 @@ static int sev_receive_finish(struct kvm *kvm, struct kvm_sev_cmd *argp)
 	return ret;
 }
 
+static int sev_resize_page_enc_bitmap(struct kvm *kvm, unsigned long new_size)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	unsigned long *map;
+	unsigned long sz;
+
+	if (sev->page_enc_bmap_size >= new_size)
+		return 0;
+
+	sz = ALIGN(new_size, BITS_PER_LONG) / 8;
+
+	if (sz > PAGE_SIZE)
+		map = vmalloc(sz);
+	else
+		map = kmalloc(sz, GFP_KERNEL);
+
+	if (!map) {
+		pr_err_once("Failed to allocate decrypted bitmap size %lx\n", sz);
+		return 1;
+	}
+
+	/* mark the page encrypted (by default) */
+	memset(map, 0xff, sz);
+
+	bitmap_copy(map, sev->page_enc_bmap, sev->page_enc_bmap_size);
+	kvfree(sev->page_enc_bmap);
+
+	sev->page_enc_bmap = map;
+	sev->page_enc_bmap_size = new_size;
+
+	return 0;
+}
+
+static int svm_page_enc_status_hc(struct kvm *kvm, unsigned long gpa,
+				  unsigned long npages, unsigned long enc)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	gfn_t gfn_start, gfn_end;
+	int r;
+
+	if (!npages)
+		return 0;
+
+	gfn_start = gpa_to_gfn(gpa);
+	gfn_end = gfn_start + npages;
+
+	mutex_lock(&kvm->lock);
+
+	r = 1;
+	if (sev_resize_page_enc_bitmap(kvm, gfn_end))
+		goto unlock;
+
+	if (enc)
+		__bitmap_set(sev->page_enc_bmap, gfn_start, gfn_end - gfn_start);
+	else
+		__bitmap_clear(sev->page_enc_bmap, gfn_start, gfn_end - gfn_start);
+
+	r = 0;
+unlock:
+	mutex_unlock(&kvm->lock);
+	return r;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -7711,6 +7778,8 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 	.nested_get_evmcs_version = nested_get_evmcs_version,
 
 	.need_emulation_on_page_fault = svm_need_emulation_on_page_fault,
+
+	.page_enc_status_hc = svm_page_enc_status_hc
 };
 
 static int __init svm_init(void)
