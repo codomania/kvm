@@ -7437,6 +7437,57 @@ unlock:
 	return r;
 }
 
+static int svm_get_page_enc_bitmap(struct kvm *kvm,
+				   struct kvm_page_enc_bitmap *bmap)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	unsigned long gfn_start, gfn_end;
+	struct kvm_memory_slot *memslot;
+	struct kvm_memslots *slots;
+	unsigned long *bitmap;
+	unsigned long sz, i;
+	int ret, as_id, id;
+
+	if (!sev_guest(kvm))
+		return -ENOTTY;
+
+	as_id = bmap->slot >> 16;
+	id = (u16)bmap->slot;
+	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_USER_MEM_SLOTS)
+		return -EINVAL;
+
+	slots = __kvm_memslots(kvm, as_id);
+	memslot = id_to_memslot(slots, id);
+
+	gfn_start = memslot->base_gfn;
+	gfn_end = gfn_start + memslot->npages;
+
+	sz = ALIGN(memslot->npages, BITS_PER_LONG) / 8;
+	bitmap = kmalloc(sz, GFP_KERNEL);
+	if (!bitmap)
+		return -ENOMEM;
+
+	memset(bitmap, 0xff, sz); /* by default all pages are marked encrypted */
+
+	mutex_lock(&kvm->lock);
+	if (sev->page_enc_bmap) {
+		i = gfn_start;
+		for_each_clear_bit_from(i, sev->page_enc_bmap,
+				      min(sev->page_enc_bmap_size, gfn_end))
+			clear_bit(i - gfn_start, bitmap);
+	}
+	mutex_unlock(&kvm->lock);
+
+	ret = -EFAULT;
+	if (copy_to_user(bmap->enc_bitmap, bitmap, sz))
+		goto out;
+
+	ret = 0;
+out:
+	kfree(bitmap);
+	return ret;
+}
+
 static int svm_mem_enc_op(struct kvm *kvm, void __user *argp)
 {
 	struct kvm_sev_cmd sev_cmd;
@@ -7779,7 +7830,8 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
 
 	.need_emulation_on_page_fault = svm_need_emulation_on_page_fault,
 
-	.page_enc_status_hc = svm_page_enc_status_hc
+	.page_enc_status_hc = svm_page_enc_status_hc,
+	.get_page_enc_bitmap = svm_get_page_enc_bitmap
 };
 
 static int __init svm_init(void)
