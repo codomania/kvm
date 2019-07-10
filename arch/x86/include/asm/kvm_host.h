@@ -1202,6 +1202,7 @@ struct kvm_x86_ops {
 	int (*page_enc_status_hc)(struct kvm *kvm, unsigned long gpa,
 				  unsigned long sz, unsigned long mode);
 	int (*get_page_enc_bitmap)(struct kvm *kvm, struct kvm_page_enc_bitmap *bmap);
+	int (*set_page_enc_bitmap)(struct kvm *kvm, struct kvm_page_enc_bitmap *bmap);
 };
 
 struct kvm_arch_async_pf {
