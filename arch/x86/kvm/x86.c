@@ -7219,6 +7219,11 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 	case KVM_HC_SEND_IPI:
 		ret = kvm_pv_send_ipi(vcpu->kvm, a0, a1, a2, a3, op_64_bit);
 		break;
+	case KVM_HC_PAGE_ENC_STATUS:
+		ret = -KVM_ENOSYS;
+		if (kvm_x86_ops->page_enc_status_hc)
+			ret = kvm_x86_ops->page_enc_status_hc(vcpu->kvm, a0, a1, a2);
+		break;
 	default:
 		ret = -KVM_ENOSYS;
 		break;

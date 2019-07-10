@@ -7724,6 +7724,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
 	.get_vmcs12_pages = NULL,
 	.nested_enable_evmcs = NULL,
 	.need_emulation_on_page_fault = vmx_need_emulation_on_page_fault,
+	.page_enc_status_hc = NULL,
 };
 
 static void vmx_cleanup_l1d_flush(void)
